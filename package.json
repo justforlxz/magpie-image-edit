@@ -1,0 +1,25 @@
+{
+  "name": "magpie-image-edit",
+  "version": "0.1.0",
+  "description": "Magpie plugin: image generation and image-to-image (edit) MCP tools that answer with base64",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "magpie-plugin",
+    "mcp",
+    "image",
+    "image-generation",
+    "image-edit"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/",
+    "e2e": "node scripts/e2e-host.mjs"
+  }
+}
