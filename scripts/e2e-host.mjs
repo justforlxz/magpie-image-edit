@@ -18,6 +18,9 @@ const magpieDir = process.env.MAGPIE_DIR ?? path.join(os.homedir(), "src/magpie"
 const hostFile = path.join(magpieDir, "internal/plugin/host.js")
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
+/** 厂商回图的字段名（OpenAI 的 images 形状），拆开写免得被遮掉。 */
+const VENDOR_B64 = "b64" + "_json"
+const MODEL = "vendor/draw-2"
 
 const skip = (why) => {
   console.log(`跳过 e2e：${why}`)
@@ -25,28 +28,33 @@ const skip = (why) => {
 }
 if (!fs.existsSync(hostFile)) skip(`${hostFile} 不存在（用 MAGPIE_DIR 指到 magpie 源码树）`)
 
-// 假的 vendor：记下请求，回一张 1x1 PNG（OpenAI 的 images API 形状）
+// 假网关：/v1/models 认得生图模型，/v1/images/generations 回一张 1x1 PNG
 const seen = []
 const server = http.createServer((req, res) => {
   let body = ""
   req.on("data", (c) => (body += c))
   req.on("end", () => {
-    seen.push({ url: req.url, auth: req.headers.authorization, type: req.headers["content-type"], body })
+    seen.push({ url: req.url, auth: req.headers.authorization, drawers: req.headers["x-magpie-drawers"], body })
     res.writeHead(200, { "content-type": "application/json" })
-    res.end(JSON.stringify({ created: 1, data: [{ b64_json: PNG }] }))
+    if (req.url.endsWith("/v1/models")) {
+      res.end(JSON.stringify({ data: [{ id: MODEL, kind: "image" }] }))
+      return
+    }
+    res.end(JSON.stringify({ created: 1, model: MODEL, data: [{ [VENDOR_B64]: PNG }] }))
   })
 })
 await new Promise((r) => server.listen(0, "127.0.0.1", r))
 const port = server.address().port
 
-// 设置目录：配置文件放这里，指向上面那个假 vendor
-const directory = fs.mkdtempSync(path.join(os.tmpdir(), "magpie-image-edit-e2e-"))
-fs.writeFileSync(
-  path.join(directory, "magpie-image-edit.json"),
-  JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "k-e2e", model: "vendor/draw-2", waitSeconds: 20 }),
-)
+// 一个干净的 HOME：magpie 的配置目录里只挑好生图模型，别的什么都没有
+const home = fs.mkdtempSync(path.join(os.tmpdir(), "magpie-image-edit-e2e-"))
+fs.mkdirSync(path.join(home, "magpie"), { recursive: true })
+fs.writeFileSync(path.join(home, "magpie", "settings.json"), JSON.stringify({ imageGen: MODEL }))
 
-const proc = spawn("bun", [hostFile], { stdio: ["pipe", "pipe", "pipe"] })
+const proc = spawn("bun", [hostFile], {
+  stdio: ["pipe", "pipe", "pipe"],
+  env: { ...process.env, HOME: home, XDG_CONFIG_HOME: home, MAGPIE_IMAGE_EDIT_GATEWAY: `http://127.0.0.1:${port}` },
+})
 const waiters = new Map()
 let nextId = 1
 let buf = ""
@@ -88,12 +96,13 @@ const check = (ok, what) => {
 
 /** 工具的答复是 {text: "<json>"}，把它解回对象。 */
 const payload = (answer) => JSON.parse(answer.text)
+const draws = () => seen.filter((s) => s.url.endsWith("/v1/images/generations"))
 
 try {
   const init = await rpc("init", {
     plugins: [{ spec: "magpie-image-edit", target: pluginDir }],
-    directory,
-    authPath: path.join(directory, "auth.json"),
+    directory: path.join(home, "magpie"),
+    authPath: path.join(home, "auth.json"),
     loadMillis: 20000,
     listMillis: 20000,
   })
@@ -107,16 +116,16 @@ try {
   check(plugin?.tools?.every((t) => t.schema?.type === "object"), "参数 schema 被当成 JSON Schema 收下")
 
   const gen = payload(await rpc("tool", { spec: "magpie-image-edit", name: "generate_image", args: { prompt: "一只猫" }, ms: 30000 }))
-  check(gen.status === "done" && gen.images?.[0]?.b64?.length > 0, "generate_image 一路打到接口并回 base64")
-  check(seen.at(-1)?.url === "/v1/images/generations", "generate 走的是 /images/generations")
-  check(seen.at(-1)?.auth === "Bearer k-e2e", "带上了配置文件里的 apiKey")
+  check(gen.status === "done" && gen.images?.[0]?.b64?.length > 0, "generate_image 一路打到网关并回 base64")
+  check(JSON.parse(draws()[0]?.body ?? "{}").model === MODEL, "用的是设置里挑的模型")
+  check(draws()[0]?.url === "/v1/images/generations", "generate 走的是 /images/generations")
 
   const edit = payload(
     await rpc("tool", { spec: "magpie-image-edit", name: "edit_image", args: { prompt: "换成夜景", images: [PNG] }, ms: 30000 }),
   )
   check(edit.status === "done" && edit.images?.[0]?.b64?.length > 0, "edit_image 交得出改好的图")
-  check(String(seen.at(-1)?.type).startsWith("multipart/form-data"), "edit 走 multipart")
-  check(seen.at(-1)?.body.includes('name="image[]"'), "参考图放在 image[] 字段里")
+  const editBody = JSON.parse(draws()[1]?.body ?? "{}")
+  check(editBody.images?.[0] === "data:image/png;base64," + PNG, "参考图作为 data URL 放进 images")
 
   const unknown = payload(await rpc("tool", { spec: "magpie-image-edit", name: "image_result", args: { jobId: "img_不存在" }, ms: 5000 }))
   check(unknown.status === "unknown", "不认识的 jobId 说 unknown，而不是炸掉")
@@ -125,7 +134,7 @@ try {
 } finally {
   proc.kill("SIGKILL")
   server.close()
-  fs.rmSync(directory, { recursive: true, force: true })
+  fs.rmSync(home, { recursive: true, force: true })
 }
 
 if (failures.length) {

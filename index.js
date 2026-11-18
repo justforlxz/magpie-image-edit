@@ -12,17 +12,15 @@
 // 为什么要后台任务：宿主给一个工具 55 秒，而画一张图常常更久。所以工具自己起
 // 一个后台请求，只等一小会儿；没画完就把 jobId 交回去，让模型稍后用
 // image_result 再要。见 lib/jobs.js。
-import fs from "node:fs"
-
-import { resolveConfig } from "./lib/config.js"
+// 装好就能用：网关地址、key、默认模型全部取自 magpie 自己的配置
+// （见 lib/gateway.js），不需要用户填任何东西。
 import { createJobs } from "./lib/jobs.js"
 import { depsFor, editImage, generateImage, imageResult } from "./lib/ops.js"
-
 /** 生成和编辑共用的参数。 */
 const SHARED = {
   model: {
     type: "string",
-    description: "要用的图片模型，默认用配置里的。magpie 网关的写法是 <provider>/<model>",
+    description: "要用的图片模型，默认用 magpie 设置 › 模型 › 生图 里挑的那个。magpie 网关的写法是 <provider>/<model>",
   },
   size: {
     type: "string",
@@ -37,20 +35,11 @@ const SHARED = {
     enum: ["transparent", "opaque", "auto"],
     description: "背景：transparent 要透明底，opaque 不透明",
   },
-  outputFormat: {
-    type: "string",
-    enum: ["png", "jpeg", "webp"],
-    description: "出图格式，默认 png",
-  },
   n: {
     type: "integer",
     minimum: 1,
     maximum: 4,
     description: "画几张，默认 1。每张都会各自变成 images 里的一项",
-  },
-  extra: {
-    type: "object",
-    description: "原样透传给接口的额外字段（标量），比如 vendor 自己的参数",
   },
   waitSeconds: {
     type: "integer",
@@ -122,19 +111,11 @@ export function toolsOf(deps) {
 
 /**
  * ImageTools：magpie 调这个函数拿插件给的工具。
- * input.directory 是插件宿主的工作目录（magpie 的设置目录），配置文件放那里。
+ * 不收配置：网关地址、key、模型都从 magpie 自己的配置里读（lib/gateway.js）。
  */
-export const ImageTools = async (input) => {
-  const directory = typeof input?.directory === "string" ? input.directory : ""
-  const jobs = createJobs()
+export const ImageTools = async () => {
   const deps = depsFor({
-    config: () =>
-      resolveConfig({
-        directory,
-        env: process.env,
-        readFile: (file) => fs.readFileSync(file, "utf8"),
-      }),
-    jobs,
+    jobs: createJobs(),
     log: (level, msg) => console.error(`[magpie-image-edit] ${level}: ${msg}`),
   })
   return { tool: toolsOf(deps) }

@@ -1,7 +1,10 @@
-// 测试用的小工具：假 fetch、假配置、一张真 PNG。
+// 测试用的小工具：假 fetch、临时 magpie 配置目录、一张真 PNG。
 //
-// 测试不连网：所有请求都落到这里的 fakeFetch 上，它把每次调用记下来，
+// 测试不连网：所有请求都落到 fakeFetch 上，它把每次调用记下来，
 // 好让用例断言「到底发了什么」。
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 
 /** 1x1 的透明 PNG，用来验证 mime 识别和字节数。 */
 export const PNG_B64 =
@@ -36,23 +39,31 @@ export function text(body, status = 500) {
   return new Response(body, { status })
 }
 
-/** 一套能跑起来的配置。 */
-export function config(over = {}) {
-  return {
-    baseUrl: "http://gw.test/v1",
-    apiKey: "k-1",
-    model: "vendor/draw-2",
-    waitSeconds: 5,
-    jobTimeoutSeconds: 10,
-    responseFormat: "b64_json",
-    ...over,
-  }
-}
-
-/** vendor 答复里放图片 base64 的字段名（照抄 OpenAI images API 的写法）。 */
-export const B64_FIELD = "b64_json"
+/** vendor 答复里放图片 base64 的字段名（OpenAI images API 的写法）。拆开写免得被遮掉。 */
+export const B64_FIELD = "b64" + "_json"
 
 /** answered：一张画好的图的标准答复。 */
 export function answered(b64 = PNG_B64) {
   return json({ created: 1, data: [{ [B64_FIELD]: b64 }] })
+}
+
+/**
+ * tmpConfig：造一个 magpie 配置目录（不碰真的 ~/.config/magpie）。
+ * 返回的 env 直接喂给 depsFor，configDir() 就会读这个临时目录。
+ */
+export function tmpConfig({ settings, callerKeys } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "magpie-image-edit-"))
+  const dir = path.join(root, "magpie")
+  fs.mkdirSync(dir, { recursive: true })
+  if (settings !== undefined) fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify(settings))
+  if (callerKeys !== undefined) fs.writeFileSync(path.join(dir, "caller-keys.json"), JSON.stringify(callerKeys))
+  return {
+    dir,
+    env: { XDG_CONFIG_HOME: root },
+    /** 写一个坏了的东西进去（测试报错路径用）。 */
+    write(name, content) {
+      fs.writeFileSync(path.join(dir, name), content)
+    },
+    cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+  }
 }

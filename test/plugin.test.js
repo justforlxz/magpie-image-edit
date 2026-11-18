@@ -1,25 +1,34 @@
 import assert from "node:assert/strict"
-import fs from "node:fs"
-import os from "node:os"
-import path from "node:path"
-import { test } from "node:test"
+import { afterEach, test } from "node:test"
 
 import { ImageTools, toolsOf } from "../index.js"
 import { createJobs } from "../lib/jobs.js"
 import { depsFor } from "../lib/ops.js"
-import { PNG_B64, answered, config, fakeFetch } from "./helpers.js"
+import { PNG_B64, answered, fakeFetch, tmpConfig } from "./helpers.js"
 
 /** 宿主那边：工具名有硬性格式要求。 */
 const NAME_RE = /^[A-Za-z0-9_-]{1,48}$/
 
+const opened = []
+const track = (cfg) => (opened.push(cfg), cfg)
+afterEach(() => {
+  for (const cfg of opened.splice(0)) {
+    try {
+      cfg.cleanup()
+    } catch {
+      /* 已经删过了 */
+    }
+  }
+})
+
 test("ImageTools 给出三个工具，名字都合规", async () => {
-  const { tool } = await ImageTools({ directory: "" })
+  const { tool } = await ImageTools()
   assert.deepEqual(Object.keys(tool).sort(), ["edit_image", "generate_image", "image_result"])
   for (const name of Object.keys(tool)) assert.match(name, NAME_RE)
 })
 
 test("每个工具都有说明、能校验的 args、能调用的 execute", async () => {
-  const { tool } = await ImageTools({ directory: "" })
+  const { tool } = await ImageTools()
 
   for (const [name, t] of Object.entries(tool)) {
     assert.equal(typeof t.execute, "function", `${name} 缺 execute`)
@@ -39,7 +48,7 @@ test("每个工具都有说明、能校验的 args、能调用的 execute", asyn
 })
 
 test("参数说明写清楚了（模型看得懂才行）", async () => {
-  const { tool } = await ImageTools({ directory: "" })
+  const { tool } = await ImageTools()
 
   assert.deepEqual(tool.generate_image.args.required, ["prompt"])
   assert.deepEqual(tool.edit_image.args.required, ["prompt", "images"])
@@ -54,10 +63,10 @@ test("参数说明写清楚了（模型看得懂才行）", async () => {
   assert.equal(tool.generate_image.args.properties.waitSeconds.maximum, 50)
 })
 
-test("从 ImageTools 到真实请求：一整条链路走得通", async () => {
+test("从 ImageTools 到真实请求：一整条链路走得通，用户什么都没配", async () => {
+  const cfg = track(tmpConfig({ settings: { imageGen: "vendor/draw-2" } }))
   const fetchImpl = fakeFetch(() => answered())
-  const cfg = config()
-  const deps = depsFor({ config: () => cfg, jobs: createJobs(), fetchImpl, log: () => {} })
+  const deps = depsFor({ jobs: createJobs(), fetchImpl, env: cfg.env, log: () => {} })
   const { tool } = { tool: toolsOf(deps) }
 
   const out = await tool.generate_image.execute({ prompt: "一只猫" }, {})
@@ -68,23 +77,19 @@ test("从 ImageTools 到真实请求：一整条链路走得通", async () => {
   assert.equal(edit.status, "done")
 })
 
-test("配置写坏了：调用工具时把原因说出来，而不是静默失败", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mie-cfg-"))
-  fs.writeFileSync(path.join(dir, "magpie-image-edit.json"), "{ 这不是 JSON }")
+test("magpie 的配置写坏了也不影响插件加载：只是当作没挑模型", async () => {
+  const cfg = track(tmpConfig())
+  cfg.write("settings.json", "{ 这不是 JSON }")
 
-  const { tool } = await ImageTools({ directory: dir })
-  await assert.rejects(
-    () => tool.generate_image.execute({ prompt: "p" }, {}),
-    (e) => {
-      assert.match(e.message, /magpie-image-edit\.json/)
-      return true
-    },
-  )
+  const fetchImpl = fakeFetch(() => answered())
+  const deps = depsFor({ jobs: createJobs(), fetchImpl, env: cfg.env, log: () => {} })
+  const { tool } = { tool: toolsOf(deps) }
 
-  fs.rmSync(dir, { recursive: true, force: true })
+  // 网关也没列出任何模型 → 明确要求去设置里选一个
+  await assert.rejects(() => tool.generate_image.execute({ prompt: "p" }, {}), /设置 › 模型 › 生图/)
 })
 
-test("杂乱输入不会炸：没目录、没 input 也照样给出工具", async () => {
+test("不给 input 也照样给出工具（宿主怎么调都不炸）", async () => {
   for (const input of [undefined, null, {}, { directory: 42 }]) {
     const out = await ImageTools(input)
     assert.equal(Object.keys(out.tool).length, 3)
